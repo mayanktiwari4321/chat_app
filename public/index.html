@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp-Like Chat App</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    .chat-container {
+      height: calc(100vh - 60px);
+    }
+    .message-container {
+      height: calc(100% - 60px);
+    }
+    .chat-bubble {
+      max-width: 70%;
+      border-radius: 1.125rem;
+    }
+    .sender-bubble {
+      background-color: #dcf8c6;
+      border-bottom-right-radius: 0.25rem;
+    }
+    .receiver-bubble {
+      background-color: white;
+      border-bottom-left-radius: 0.25rem;
+    }
+    .online-dot {
+      width: 10px;
+      height: 10px;
+      background-color: #4ade80;
+      border-radius: 50%;
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      border: 2px solid white;
+    }
+    .unread-badge {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      background-color: #f56565;
+      color: white;
+      border-radius: 50%;
+      width: 18px;
+      height: 18px;
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function App() {
+      const [token, setToken] = useState('');
+      const [username, setUsername] = useState('');
+      const [password, setPassword] = useState('');
+      const [isAuthenticated, setIsAuthenticated] = useState(false);
+      const [isRegistering, setIsRegistering] = useState(false);
+      const [message, setMessage] = useState('');
+      const [messages, setMessages] = useState([]);
+      const [privateMessages, setPrivateMessages] = useState({});
+      const [userList, setUserList] = useState([]);
+      const [selectedUser, setSelectedUser] = useState(null);
+      const [error, setError] = useState('');
+      const [unreadCounts, setUnreadCounts] = useState({});
+      const socket = useRef(null);
+      const messagesEndRef = useRef(null);
+
+      useEffect(() => {
+        if (isAuthenticated) {
+          socket.current = io({ auth: { token } });
+
+          socket.current.on('message', (msg) => {
+            setMessages((prev) => [...prev, msg]);
+          });
+
+          socket.current.on('privateMessage', ({ from, message: msg }) => {
+            console.log('Received private message from', from);
+            setPrivateMessages((prev) => {
+              const updated = {...prev};
+              if (!updated[from]) updated[from] = [];
+              
+              // Check if message already exists
+              const exists = updated[from].some(m => 
+                m.text === msg.text && m.timestamp === msg.timestamp
+              );
+              
+              if (!exists) {
+                updated[from].push({
+                  ...msg,
+                  id: Date.now() // Add unique ID
+                });
+              }
+              
+              return updated;
+            });
+
+            // Update unread count if not the current chat
+            if (selectedUser?.username !== from) {
+              setUnreadCounts(prev => ({
+                ...prev,
+                [from]: (prev[from] || 0) + 1
+              }));
+            }
+          });
+
+          socket.current.on('userList', (users) => {
+            console.log('User list updated:', users);
+            setUserList(users.filter((u) => u.username !== username));
+          });
+
+          socket.current.on('error', (err) => {
+            console.error('Socket error:', err);
+            setError(err);
+          });
+
+          socket.current.on('privateHistory', ({ messages: history }) => {
+            if (selectedUser) {
+              setPrivateMessages(prev => ({
+                ...prev,
+                [selectedUser.username]: history
+              }));
+            }
+          });
+
+          // Join the chat
+          socket.current.emit('join', username);
+
+          return () => {
+            if (socket.current) {
+              socket.current.disconnect();
+            }
+          };
+        }
+      }, [isAuthenticated, token, username]);
+
+      useEffect(() => {
+        scrollToBottom();
+        
+        // Clear unread count when selecting a user
+        if (selectedUser && unreadCounts[selectedUser.username]) {
+          setUnreadCounts(prev => ({
+            ...prev,
+            [selectedUser.username]: 0
+          }));
+        }
+        
+        // Load private history when selecting a user
+        if (selectedUser && socket.current) {
+          socket.current.emit('getPrivateHistory', { withUser: selectedUser.username });
+        }
+      }, [messages, privateMessages, selectedUser]);
+
+      const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      };
+
+      const handleLogin = async () => {
+        try {
+          const res = await fetch('/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            setToken(data.token);
+            setIsAuthenticated(true);
+            setError('');
+          } else {
+            setError(data.error || 'Login failed');
+          }
+        } catch (err) {
+          setError('Login failed');
+        }
+      };
+
+      const handleLogout = () => {
+        if (socket.current) {
+          socket.current.emit('leave', username);
+          socket.current.disconnect();
+        }
+        setIsAuthenticated(false);
+        setUsername('');
+        setPassword('');
+        setMessages([]);
+        setPrivateMessages({});
+        setToken('');
+      };
+
+      const sendMessage = (e) => {
+        e.preventDefault();
+        if (message.trim() && socket.current) {
+          const timestamp = new Date().toLocaleTimeString();
+          if (selectedUser) {
+            console.log('Sending private message to', selectedUser.username);
+            socket.current.emit('privateMessage', {
+              to: selectedUser.username,
+              message: {
+                user: username,
+                text: message,
+                timestamp,
+                isPrivate: true
+              }
+            });
+          } else {
+            socket.current.emit('chatMessage', {
+              user: username,
+              text: message,
+              timestamp
+            });
+          }
+          setMessage('');
+        }
+      };
+
+      const getCurrentMessages = () => {
+        return selectedUser 
+          ? privateMessages[selectedUser.username] || []
+          : messages;
+      };
+
+      return (
+        <div className="min-h-screen">
+          {!isAuthenticated ? (
+            <div className="max-w-md mx-auto mt-10 bg-white p-6 rounded-lg shadow">
+              <h1 className="text-2xl font-bold mb-4 text-center">
+                {isRegistering ? 'Register' : 'Login'}
+              </h1>
+              {error && <p className="text-red-500 mb-4 text-center">{error}</p>}
+              <div className="space-y-4">
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Username"
+                  className="w-full p-2 border rounded"
+                  required
+                />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Password"
+                  className="w-full p-2 border rounded"
+                  required
+                />
+                <button
+                  onClick={isRegistering ? () => {} : handleLogin}
+                  className="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600"
+                >
+                  {isRegistering ? 'Register' : 'Login'}
+                </button>
+                <button
+                  onClick={() => setIsRegistering(!isRegistering)}
+                  className="w-full text-blue-500"
+                >
+                  {isRegistering ? 'Already have an account? Login' : 'Need an account? Register'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-screen">
+              {/* Sidebar */}
+              <div className="w-1/3 bg-white border-r">
+                <div className="p-4 bg-green-600 text-white flex justify-between items-center">
+                  <h2 className="font-semibold">{username}</h2>
+                  <button
+                    onClick={handleLogout}
+                    className="text-sm bg-red-500 px-2 py-1 rounded"
+                  >
+                    Logout
+                  </button>
+                </div>
+                <div className="p-2">
+                  <button
+                    onClick={() => setSelectedUser(null)}
+                    className={`w-full text-left p-3 rounded-lg mb-1 ${
+                      !selectedUser ? 'bg-gray-200' : 'hover:bg-gray-100'
+                    }`}
+                  >
+                    Group Chat
+                  </button>
+                  {userList.map((user) => (
+                    <button
+                      key={user.username}
+                      onClick={() => setSelectedUser(user)}
+                      className={`w-full text-left p-3 rounded-lg mb-1 flex items-center relative ${
+                        selectedUser?.username === user.username ? 'bg-gray-200' : 'hover:bg-gray-100'
+                      }`}
+                    >
+                      <div className="relative mr-3">
+                        <div className="w-10 h-10 rounded-full bg-gray-300 flex items-center justify-center">
+                          {user.username.charAt(0).toUpperCase()}
+                        </div>
+                        {user.online && <div className="online-dot"></div>}
+                        {unreadCounts[user.username] > 0 && (
+                          <div className="unread-badge">
+                            {unreadCounts[user.username]}
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <div className="font-medium">{user.username}</div>
+                        <div className="text-xs text-gray-500 truncate">
+                          {privateMessages[user.username]?.[privateMessages[user.username].length - 1]?.text || ''}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Chat Area */}
+              <div className="flex-1 flex flex-col">
+                <div className="p-4 bg-green-600 text-white">
+                  <h2 className="font-semibold">
+                    {selectedUser ? `Private Chat with ${selectedUser.username}` : 'Group Chat'}
+                  </h2>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 bg-gray-100 message-container">
+                  {getCurrentMessages().map((msg, index) => (
+                    <div
+                      key={index}
+                      className={`mb-4 flex ${
+                        msg.user === username ? 'justify-end' : 'justify-start'
+                      }`}
+                    >
+                      <div
+                        className={`chat-bubble p-3 ${
+                          msg.user === username ? 'sender-bubble' : 'receiver-bubble'
+                        }`}
+                      >
+                        {msg.user !== username && (
+                          <div className="text-xs font-semibold text-gray-700">
+                            {msg.user}
+                          </div>
+                        )}
+                        <div className="text-sm">{msg.text}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {msg.timestamp}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </div>
+                <form onSubmit={sendMessage} className="p-4 bg-white border-t">
+                  <div className="flex">
+                    <input
+                      type="text"
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      placeholder={`Type a message...`}
+                      className="flex-1 p-2 border rounded-l-lg focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-green-500 text-white px-4 py-2 rounded-r-lg hover:bg-green-600"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
